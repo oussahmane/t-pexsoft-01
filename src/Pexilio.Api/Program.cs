@@ -16,6 +16,7 @@ builder.Services.AddPexilio(builder.Configuration);
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new OptionalTextConverter());
+    options.SerializerOptions.Converters.Add(new CustomerStatementLineConverter());
 });
 builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ProblemAuthorizationMiddlewareResultHandler>();
 builder.Services.AddHealthChecks()

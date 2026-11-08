@@ -30,6 +30,20 @@ public sealed class Sale
 
     public string? CustomerType { get; set; }
 
+    public bool CreditLimitOverridden { get; set; }
+
+    public string? CreditOverrideReason { get; set; }
+
+    public Guid? CreditOverrideByUserId { get; set; }
+
+    public DateTimeOffset? CreditOverrideAtUtc { get; set; }
+
+    public decimal? CreditLimitSnapshot { get; set; }
+
+    public decimal? CreditOutstandingBefore { get; set; }
+
+    public decimal? CreditProjectedOutstanding { get; set; }
+
     public List<SaleLine> Lines { get; set; } = [];
 
     public List<SalePayment> Payments { get; set; } = [];

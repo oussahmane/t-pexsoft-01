@@ -26,6 +26,12 @@ public static class SaleWriteFailure
             return true;
         }
 
+        if (Contains(message, ErrorCodes.SaleCreditOverrideIntegrity))
+        {
+            code = ErrorCodes.SaleCreditOverrideIntegrity;
+            return true;
+        }
+
         if (Contains(message, ErrorCodes.SaleTotalIntegrity))
         {
             code = ErrorCodes.SaleTotalIntegrity;

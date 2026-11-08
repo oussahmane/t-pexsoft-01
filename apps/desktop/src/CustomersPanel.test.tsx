@@ -247,6 +247,45 @@ describe("CustomersPanel", () => {
     expect(summary).not.toHaveTextContent("Solde dû");
   });
 
+  it("shows the statement customer name on screen and in the printed statement", async () => {
+    const user = userEvent.setup();
+    const fetcher = vi.fn(async (input: string) => {
+      if (String(input).includes("/statement")) {
+        return json({
+          customerId: amin.id,
+          customerName: "Sara Benali",
+          timeZoneId: "Africa/Algiers",
+          from: "2026-11-01",
+          to: "2026-12-01",
+          openingBalance: "0.0000",
+          closingBalance: "0.0000",
+          outstandingAmount: "0.0000",
+          lines: [],
+        });
+      }
+      return json([amin, { ...otherAmin, name: "Lina", phone: "0551999999", address: "Rue 9" }]);
+    });
+    render(
+      <CustomersPanel apiBaseUrl="http://127.0.0.1:5080" accessToken="token" fetcher={fetcher} locale="fr" />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /0551000001/ }));
+    expect(screen.getByTestId("customer-statement")).not.toHaveTextContent("Sara Benali");
+    await user.click(screen.getByRole("button", { name: "Afficher le relevé" }));
+    const name = await screen.findByTestId("customer-statement-name");
+    expect(name).toHaveTextContent("Nom du client");
+    expect(name).toHaveTextContent("Sara Benali");
+    expect(name).not.toHaveTextContent("0551000001");
+    expect(name).not.toHaveTextContent("Lina");
+    expect(name).not.toHaveTextContent("Rue 9");
+    const statement = screen.getByTestId("customer-statement");
+    expect(statement).toContainElement(name);
+    expect(printVisibility(name, customerStatementPrintCss)).toBe("visible");
+    expect(translate("fr", "customers.name")).toBe("Nom du client");
+    expect(translate("ar", "customers.name")).toBe("اسم الزبون");
+    expect(translate("en", "customers.name")).toBe("Customer name");
+  });
+
   it("prints only the statement and leaves other customers out of that section", async () => {
     const user = userEvent.setup();
     const fetcher = vi.fn(async (input: string) => {
@@ -294,6 +333,48 @@ describe("CustomersPanel", () => {
     expect(translate("fr", "sale.payment_integrity")).toBe("Le solde du client est incohérent.");
     expect(translate("ar", "sale.payment_integrity")).toBe("رصيد الزبون غير متسق.");
     expect(translate("en", "sale.payment_integrity")).toBe("The customer balance is inconsistent.");
+  });
+
+  it("refreshes the outstanding amount and the open statement after a sale return", async () => {
+    const user = userEvent.setup();
+    let outstanding = "15.0000";
+    const statementFor = (amount: string) => ({
+      customerId: amin.id,
+      customerName: amin.name,
+      timeZoneId: "Africa/Algiers",
+      from: "2026-11-01",
+      to: "2026-12-01",
+      openingBalance: "0.0000",
+      closingBalance: amount,
+      outstandingAmount: amount,
+      lines: [
+        { occurredAt: "2026-11-08T10:00:00Z", kind: "sale", documentId: "sale-1", documentNumber: "V-000020", amount: "40.0000", runningBalance: "40.0000" },
+        ...(amount === "5.0000"
+          ? [{ occurredAt: "2026-11-08T11:00:00Z", kind: "return", documentId: "ret-1", documentNumber: "AV-000001", amount: "-10.0000", runningBalance: "5.0000" }]
+          : []),
+      ],
+    });
+    const fetcher = vi.fn(async (input: string) => {
+      if (input.includes("/statement")) {
+        return json(statementFor(outstanding));
+      }
+      return json([{ ...amin, outstandingAmount: outstanding }]);
+    });
+    const view = render(
+      <CustomersPanel apiBaseUrl="http://127.0.0.1:5080" accessToken="token" fetcher={fetcher} locale="fr" revision={0} />,
+    );
+    await user.click(await screen.findByRole("button", { name: /15\.0000/ }));
+    await user.click(screen.getByRole("button", { name: "Afficher le relevé" }));
+    expect(await screen.findByText("V-000020")).toBeInTheDocument();
+
+    outstanding = "5.0000";
+    view.rerender(
+      <CustomersPanel apiBaseUrl="http://127.0.0.1:5080" accessToken="token" fetcher={fetcher} locale="fr" revision={1} />,
+    );
+    expect(await screen.findByText("AV-000001")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /5\.0000/ })).toBeInTheDocument();
+    expect(screen.getAllByText("Retour")).toHaveLength(1);
+    expect(fetcher.mock.calls.filter((call) => String(call[0]).includes("/statement"))).toHaveLength(2);
   });
 });
 

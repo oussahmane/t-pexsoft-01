@@ -10,6 +10,8 @@ public static class SaleOperations
     public const string SaleFinalize = "sale.finalize";
 
     public const string SalePayment = "sale.payment";
+
+    public const string SaleReturn = "sale.return";
 }
 
 public static class SalePaymentStates

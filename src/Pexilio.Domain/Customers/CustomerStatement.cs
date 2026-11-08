@@ -1,5 +1,6 @@
 using System.Globalization;
 using Pexilio.Domain;
+using Pexilio.Domain.Sales;
 
 namespace Pexilio.Domain.Customers;
 
@@ -103,13 +104,69 @@ public static class CustomerStatementWindowRules
 
 public static class CustomerStatementMath
 {
+    public const string SaleKind = "sale";
+
+    public const string ReturnKind = "return";
+
+    public const string PaymentKind = "payment";
+
     public static int KindRank(string kind) => kind switch
     {
-        "sale" => 0,
-        "return" => 1,
-        "payment" => 2,
+        SaleKind => 0,
+        ReturnKind => 1,
+        PaymentKind => 2,
         _ => 9,
     };
+
+    public static bool TryRefundTotal(IReadOnlyList<decimal>? tenders, out decimal refundAmount)
+    {
+        refundAmount = 0m;
+        if (tenders is null || tenders.Count == 0)
+        {
+            return true;
+        }
+
+        decimal sum = 0m;
+        foreach (var tender in tenders)
+        {
+            if (tender <= 0m || !SaleRules.ExactlyScale4(tender))
+            {
+                return false;
+            }
+
+            sum += tender;
+        }
+
+        if (!SaleRules.ExactlyScale4(sum))
+        {
+            return false;
+        }
+
+        refundAmount = sum;
+        return true;
+    }
+
+    public static bool TryNetReturn(
+        decimal returnAmount,
+        decimal refundAmount,
+        out decimal netAccountReduction,
+        out decimal signedAmount)
+    {
+        netAccountReduction = 0m;
+        signedAmount = 0m;
+        if (returnAmount < 0m
+            || refundAmount < 0m
+            || refundAmount > returnAmount
+            || !SaleRules.ExactlyScale4(returnAmount)
+            || !SaleRules.ExactlyScale4(refundAmount))
+        {
+            return false;
+        }
+
+        netAccountReduction = returnAmount - refundAmount;
+        signedAmount = -netAccountReduction;
+        return SaleRules.ExactlyScale4(netAccountReduction);
+    }
 
     public static bool TryProject(
         decimal opening,

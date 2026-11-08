@@ -38,7 +38,7 @@ public sealed class Phase1ApiTests : IAsyncLifetime
         Assert.Contains("tax_rate", tables);
         Assert.Contains("refresh_token", tables);
         Assert.Contains("AspNetUsers", tables);
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
     }
 
     [Fact]
@@ -61,7 +61,7 @@ public sealed class Phase1ApiTests : IAsyncLifetime
         Assert.NotEqual(password, user.PasswordHash);
         Assert.DoesNotContain(password, user.PasswordHash, StringComparison.Ordinal);
         Assert.StartsWith("AQAAAA", user.PasswordHash, StringComparison.Ordinal);
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
     }
 
     [Fact]

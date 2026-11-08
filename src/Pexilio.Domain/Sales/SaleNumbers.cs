@@ -6,6 +6,8 @@ public static class SaleNumbers
 {
     public static string Format(long value) => "V-" + Pad(value);
 
+    public const string ReturnSeries = "sale_return";
+
     public static string FormatReturn(long value) => "AV-" + Pad(value);
 
     private static string Pad(long value)

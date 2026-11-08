@@ -115,7 +115,12 @@ public sealed class CustomerService(PexilioDbContext database, TimeProvider time
                     line.DocumentId,
                     line.DocumentNumber,
                     QuantityText.Format(line.Amount),
-                    QuantityText.Format(line.RunningBalance)))
+                    QuantityText.Format(line.RunningBalance),
+                    line.CreditLimitOverridden,
+                    line.CreditOverrideReason,
+                    Money(line.CreditLimitSnapshot, limit: true),
+                    Money(line.CreditOutstandingBefore, limit: false),
+                    Money(line.CreditProjectedOutstanding, limit: false)))
                 .ToArray()));
     }
 
@@ -337,6 +342,11 @@ public sealed class CustomerService(PexilioDbContext database, TimeProvider time
         var key = PurchasingValidator.Key(trimmed);
         return key.Length > CustomerValidator.NameMaxLength ? "" : key;
     }
+
+    private static string? Money(decimal? amount, bool limit) =>
+        amount is decimal value
+            ? limit ? UnitPriceText.Format(value) : QuantityText.Format(value)
+            : null;
 
     private static CustomerResponse ToResponse(Customer customer, decimal outstanding) =>
         new(

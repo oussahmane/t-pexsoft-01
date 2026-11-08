@@ -877,6 +877,30 @@ namespace Pexilio.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("CreatedByUserId")
                         .HasColumnType("uuid");
 
+                    b.Property<bool>("CreditLimitOverridden")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
+                    b.Property<decimal?>("CreditLimitSnapshot")
+                        .HasColumnType("numeric(19,4)");
+
+                    b.Property<decimal?>("CreditOutstandingBefore")
+                        .HasColumnType("numeric(19,4)");
+
+                    b.Property<DateTimeOffset?>("CreditOverrideAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CreditOverrideByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CreditOverrideReason")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<decimal?>("CreditProjectedOutstanding")
+                        .HasColumnType("numeric(19,4)");
+
                     b.Property<Guid?>("CustomerId")
                         .HasColumnType("uuid");
 
@@ -924,6 +948,8 @@ namespace Pexilio.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("CreatedByUserId");
 
+                    b.HasIndex("CreditOverrideByUserId");
+
                     b.HasIndex("CompanyId", "CreatedAtUtc");
 
                     b.HasIndex("CompanyId", "Number")
@@ -941,11 +967,15 @@ namespace Pexilio.Infrastructure.Persistence.Migrations
 
                             t.HasTrigger("sale_append_only_truncate");
 
+                            t.HasTrigger("sale_credit_override_snapshot");
+
                             t.HasTrigger("sale_outstanding_on_sale");
 
                             t.HasTrigger("sale_totals_match_lines");
 
                             t.HasCheckConstraint("CK_sale_amounts", "\"Subtotal\" >= 0\nAND \"DiscountAmount\" >= 0\nAND \"Total\" >= 0\nAND \"Total\" = \"Subtotal\" - \"DiscountAmount\"");
+
+                            t.HasCheckConstraint("CK_sale_credit_override", "(NOT \"CreditLimitOverridden\"\n    AND \"CreditOverrideReason\" IS NULL\n    AND \"CreditOverrideByUserId\" IS NULL\n    AND \"CreditOverrideAtUtc\" IS NULL\n    AND \"CreditLimitSnapshot\" IS NULL\n    AND \"CreditOutstandingBefore\" IS NULL\n    AND \"CreditProjectedOutstanding\" IS NULL)\nOR (\"CreditLimitOverridden\"\n    AND \"CustomerId\" IS NOT NULL\n    AND \"CreditOverrideReason\" IS NOT NULL\n    AND btrim(\"CreditOverrideReason\") = \"CreditOverrideReason\"\n    AND char_length(\"CreditOverrideReason\") BETWEEN 1 AND 200\n    AND \"CreditOverrideByUserId\" IS NOT NULL\n    AND \"CreditOverrideByUserId\" = \"CreatedByUserId\"\n    AND \"CreditOverrideAtUtc\" IS NOT NULL\n    AND \"CreditLimitSnapshot\" IS NOT NULL\n    AND \"CreditLimitSnapshot\" >= 0\n    AND \"CreditOutstandingBefore\" IS NOT NULL\n    AND \"CreditOutstandingBefore\" >= 0\n    AND \"CreditProjectedOutstanding\" IS NOT NULL\n    AND \"CreditProjectedOutstanding\" > \"CreditLimitSnapshot\")");
 
                             t.HasCheckConstraint("CK_sale_customer", "(\"CustomerId\" IS NULL AND \"CustomerName\" IS NULL AND \"CustomerType\" IS NULL)\nOR (\"CustomerId\" IS NOT NULL AND char_length(btrim(\"CustomerName\")) > 0 AND \"CustomerType\" IN ('individual', 'business'))");
 
@@ -1180,6 +1210,70 @@ namespace Pexilio.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("CK_sale_payment_amount", "\"Amount\" > 0");
 
                             t.HasCheckConstraint("CK_sale_payment_method", "\"Method\" IN ('cash', 'transfer', 'card', 'other')");
+                        });
+                });
+
+            modelBuilder.Entity("Pexilio.Domain.Sales.SaleRefund", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("Amount")
+                        .HasColumnType("numeric(19,4)");
+
+                    b.Property<Guid>("CompanyId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Method")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("Reference")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("RefundedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("RefundedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SaleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SaleReturnId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RefundedByUserId");
+
+                    b.HasIndex("SaleId", "CompanyId");
+
+                    b.HasIndex("CompanyId", "SaleReturnId", "SaleId")
+                        .HasDatabaseName("IX_sale_refund_company_return");
+
+                    b.HasIndex("SaleReturnId", "SaleId", "CompanyId");
+
+                    b.ToTable("sale_refund", "pexilio", t =>
+                        {
+                            t.HasTrigger("sale_outstanding_on_refund");
+
+                            t.HasTrigger("sale_refund_append_only");
+
+                            t.HasTrigger("sale_refund_append_only_truncate");
+
+                            t.HasTrigger("sale_refund_within_return");
+
+                            t.HasCheckConstraint("CK_sale_refund_amount", "\"Amount\" > 0");
+
+                            t.HasCheckConstraint("CK_sale_refund_method", "\"Method\" IN ('cash', 'transfer', 'card')");
                         });
                 });
 
@@ -1873,6 +1967,11 @@ namespace Pexilio.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("Pexilio.Infrastructure.Identity.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("CreditOverrideByUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("Pexilio.Domain.Customers.Customer", null)
                         .WithMany()
                         .HasForeignKey("CustomerId", "CompanyId")
@@ -1941,6 +2040,31 @@ namespace Pexilio.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("FK_sale_payment_sale");
+                });
+
+            modelBuilder.Entity("Pexilio.Domain.Sales.SaleRefund", b =>
+                {
+                    b.HasOne("Pexilio.Infrastructure.Identity.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("RefundedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Pexilio.Domain.Sales.Sale", null)
+                        .WithMany()
+                        .HasForeignKey("SaleId", "CompanyId")
+                        .HasPrincipalKey("Id", "CompanyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("FK_sale_refund_sale");
+
+                    b.HasOne("Pexilio.Domain.Sales.SaleReturn", null)
+                        .WithMany("Refunds")
+                        .HasForeignKey("SaleReturnId", "SaleId", "CompanyId")
+                        .HasPrincipalKey("Id", "SaleId", "CompanyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("FK_sale_refund_return");
                 });
 
             modelBuilder.Entity("Pexilio.Domain.Sales.SaleReturn", b =>
@@ -2079,6 +2203,8 @@ namespace Pexilio.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("Pexilio.Domain.Sales.SaleReturn", b =>
                 {
                     b.Navigation("Lines");
+
+                    b.Navigation("Refunds");
                 });
 #pragma warning restore 612, 618
         }

@@ -13,9 +13,10 @@ internal static class DatabaseGuard
             throw new InvalidOperationException("Integration tests refuse a non-loopback PostgreSQL host.");
         }
 
-        if (!database.Equals("pexilio_test", StringComparison.Ordinal))
+        if (!TestDatabaseNames.IsShared(database) && !TestDatabaseNames.IsDisposable(database))
         {
-            throw new InvalidOperationException("Integration tests refuse to use a database other than pexilio_test.");
+            throw new InvalidOperationException(
+                "Integration tests refuse to use a database other than pexilio_test or a disposable pexilio_test_<suffix> database.");
         }
     }
 

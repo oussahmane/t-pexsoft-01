@@ -189,6 +189,13 @@ public interface ISalesService
         Guid idempotencyKey,
         Guid userId,
         CancellationToken cancellationToken);
+
+    Task<Result<SaleReturnPostResponse>> PostReturnAsync(
+        Guid saleId,
+        SaleReturnPostRequest request,
+        Guid idempotencyKey,
+        Guid userId,
+        CancellationToken cancellationToken);
 }
 
 public interface ISaleProductLock

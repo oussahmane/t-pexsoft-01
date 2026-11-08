@@ -94,6 +94,52 @@ export function postSalePayment(
   });
 }
 
+export type RefundMethod = "cash" | "transfer" | "card";
+
+export type SaleReturnRequest = {
+  reason: string;
+  lines: { saleLineId: string; quantity: string }[];
+  refunds: { method: RefundMethod; amount: string }[];
+};
+
+export type SaleReturnResult = {
+  id: string;
+  saleId: string;
+  number: string;
+  reason: string;
+  returnedAt: string;
+  returnAmount: string;
+  requiredRefund: string;
+  netAccountReduction: string;
+  paidAmount: string;
+  refundedAmount: string;
+  outstandingAmount: string;
+  paymentState: "unpaid" | "partial" | "paid";
+  lines: { id: string; saleLineId: string; productId: string; quantity: string; amount: string; tracksStock: boolean }[];
+  refunds: { id: string; method: string; amount: string; reference?: string | null; notes?: string | null }[];
+};
+
+export function postSaleReturn(
+  fetcher: Fetcher,
+  apiBaseUrl: string,
+  accessToken: string,
+  saleId: string,
+  idempotencyKey: string,
+  request: SaleReturnRequest,
+  signal?: AbortSignal,
+): Promise<Response> {
+  return fetcher(`${apiBaseUrl}/api/v1/sales/${saleId}/returns`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
+    body: JSON.stringify(request),
+    signal,
+  });
+}
+
 export function getSale(
   fetcher: Fetcher,
   apiBaseUrl: string,

@@ -17,4 +17,6 @@ public sealed class SaleReturn
     public Guid ReturnedByUserId { get; set; }
 
     public List<SaleReturnLine> Lines { get; set; } = [];
+
+    public List<SaleRefund> Refunds { get; set; } = [];
 }

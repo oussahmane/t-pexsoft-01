@@ -39,7 +39,7 @@ public sealed class StockApiTests : IAsyncLifetime
         await using (var scope = _factory.Services.CreateAsyncScope())
         {
             var database = scope.ServiceProvider.GetRequiredService<PexilioDbContext>();
-            Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+            Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
             Assert.Equal(0, await database.StockBalances.CountAsync());
             Assert.Equal(0, await database.StockMovements.CountAsync());
         }

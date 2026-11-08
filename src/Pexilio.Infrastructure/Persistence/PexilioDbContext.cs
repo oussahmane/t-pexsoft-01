@@ -63,6 +63,8 @@ public sealed class PexilioDbContext(DbContextOptions<PexilioDbContext> options)
 
     public DbSet<SaleReturnLine> SaleReturnLines => Set<SaleReturnLine>();
 
+    public DbSet<SaleRefund> SaleRefunds => Set<SaleRefund>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);

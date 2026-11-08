@@ -23,6 +23,7 @@ type CustomersPanelProps = {
   locale: Locale;
   administrator?: boolean;
   createKey?: () => string;
+  revision?: number;
 };
 
 type ProblemBody = {
@@ -37,6 +38,7 @@ export function CustomersPanel({
   locale,
   administrator = false,
   createKey = () => crypto.randomUUID(),
+  revision = 0,
 }: CustomersPanelProps) {
   const text = (key: string) => translate(locale, key);
   const [query, setQuery] = useState("");
@@ -72,6 +74,17 @@ export function CustomersPanel({
   useEffect(() => {
     void reload("");
   }, [apiBaseUrl, accessToken]);
+
+  useEffect(() => {
+    if (revision === 0) {
+      return;
+    }
+
+    void reload();
+    if (statement) {
+      void showStatement();
+    }
+  }, [revision]);
 
   function select(customer: CustomerRow) {
     setSelectedId(customer.id);
@@ -338,6 +351,10 @@ export function CustomersPanel({
           {statementError ? <p role="alert">{text(statementError)}</p> : null}
           {statement ? (
             <div className="flex flex-col gap-2">
+              <p className="text-lg font-semibold" data-testid="customer-statement-name">
+                <span className="block text-sm font-normal">{text("customers.name")}</span>
+                {statement.customerName}
+              </p>
               <p>
                 {text("customers.opening")} <span dir="ltr">{statement.openingBalance}</span>
               </p>

@@ -47,7 +47,9 @@ public static class ErrorCodes
     public const string SaleReturnMovementIntegrity = "sale.return_movement_integrity";
     public const string SaleTotalIntegrity = "sale.total_integrity";
     public const string SalePaymentIntegrity = "sale.payment_integrity";
+    public const string SaleCreditOverrideIntegrity = "sale.credit_override_integrity";
     public const string SaleImmutable = "sale.immutable";
+    public const string CreditLimitExceeded = "credit.limit_exceeded";
     public const string PaymentIdempotencyConflict = "payment.idempotency_conflict";
 }
 

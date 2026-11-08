@@ -42,7 +42,7 @@ public sealed class CatalogApiTests : IAsyncLifetime
         await using var scope = _factory.Services.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<PexilioDbContext>();
         Assert.Equal(19.5000m, await database.Products.Select(item => item.UnitPrice).SingleAsync());
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
     }
 
     [Fact]

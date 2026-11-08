@@ -14,6 +14,7 @@ using Pexilio.Domain.Company;
 using Pexilio.Domain.Customers;
 using Pexilio.Domain.Sales;
 using Pexilio.Domain.Stock;
+using Pexilio.Infrastructure.Customers;
 using Pexilio.Infrastructure.Persistence;
 
 namespace Pexilio.Infrastructure.Sales;
@@ -47,13 +48,19 @@ public sealed class SalesService(
                 sale.CreatedAtUtc,
                 sale.CustomerId,
                 sale.CustomerName,
+                sale.CreditLimitOverridden,
+                sale.CreditOverrideReason,
+                sale.CreditLimitSnapshot,
+                sale.CreditOutstandingBefore,
+                sale.CreditProjectedOutstanding,
                 Paid = sale.Payments.Sum(payment => (decimal?)payment.Amount) ?? 0m,
                 Returned = database.SaleReturnLines.Where(line => line.SaleId == sale.Id).Sum(line => (decimal?)line.Amount) ?? 0m,
+                Refunded = database.SaleRefunds.Where(refund => refund.SaleId == sale.Id && refund.CompanyId == sale.CompanyId).Sum(refund => (decimal?)refund.Amount) ?? 0m,
             })
             .ToListAsync(cancellationToken);
         return Result<IReadOnlyList<SaleSummaryResponse>>.Success(sales.Select(sale =>
         {
-            var balance = Balance(sale.Total, sale.Returned, sale.Paid);
+            var balance = Balance(sale.Total, sale.Returned, sale.Paid, sale.Refunded);
             return new SaleSummaryResponse(
                 sale.Id,
                 sale.Number,
@@ -62,8 +69,14 @@ public sealed class SalesService(
                 sale.CustomerId,
                 sale.CustomerName,
                 QuantityText.Format(balance.Paid),
+                QuantityText.Format(sale.Refunded),
                 QuantityText.Format(balance.Outstanding),
-                balance.State);
+                balance.State,
+                sale.CreditLimitOverridden,
+                sale.CreditOverrideReason,
+                FormatLimit(sale.CreditLimitSnapshot),
+                FormatAmount(sale.CreditOutstandingBefore),
+                FormatAmount(sale.CreditProjectedOutstanding));
         }).ToList());
     }
 
@@ -85,7 +98,9 @@ public sealed class SalesService(
         }
 
         var returned = await ReturnedAmountAsync(company.Id, sale.Id, cancellationToken);
-        return Result<SaleResponse>.Success(ToResponse(sale, returned));
+        var refunded = await RefundedAmountAsync(company.Id, sale.Id, cancellationToken);
+        var returnedByLine = await ReturnedByLineAsync(company.Id, sale.Id, cancellationToken);
+        return Result<SaleResponse>.Success(ToResponse(sale, returned, refunded, returnedByLine));
     }
 
     public async Task<Result<SaleResponse>> FinalizeCashSaleAsync(
@@ -124,7 +139,23 @@ public sealed class SalesService(
             return Result<SaleResponse>.Fail(OperationFailure.Validation(errors));
         }
 
-        var hash = Fingerprint(SaleOperations.SaleFinalize, Canonical(draft, request.CustomerId));
+        if (!CustomerCredit.TryPrepare(
+                request.CustomerId is Guid,
+                administrator,
+                request.CreditOverride,
+                request.CreditOverrideReason,
+                out var creditReason,
+                out var creditProblem))
+        {
+            var creditError = new FieldError(creditProblem.Field, creditProblem.FieldCode);
+            return Result<SaleResponse>.Fail(creditProblem.Status == 403
+                ? new OperationFailure(403, creditProblem.Code, [creditError])
+                : OperationFailure.Validation([creditError]));
+        }
+
+        var hash = Fingerprint(
+            SaleOperations.SaleFinalize,
+            Canonical(draft, request.CustomerId, request.CreditOverride, creditReason));
         await using var tx = await database.Database.BeginTransactionAsync(cancellationToken);
         var company = await database.Companies.SingleOrDefaultAsync(cancellationToken);
         if (company is null)
@@ -275,6 +306,47 @@ public sealed class SalesService(
             overrides[index] = administrator && belowFloor;
         }
 
+        CreditOverrideSnapshot? creditSnapshot = null;
+        if (customer is not null)
+        {
+            var outstanding = await CustomerAccounts.ReadOutstandingAsync(
+                database,
+                company.Id,
+                customer.Id,
+                cancellationToken);
+            var initialPayment = draft.Payments.Sum(payment => payment.Amount);
+            var decision = CustomerCredit.Decide(
+                customer.CreditLimit,
+                outstanding,
+                draft.Total,
+                initialPayment,
+                request.CreditOverride,
+                creditReason);
+            switch (decision.Outcome)
+            {
+                case CreditOutcome.Integrity:
+                    return await AbortAsync(tx, OperationFailure.Of(409, ErrorCodes.SalePaymentIntegrity), cancellationToken);
+                case CreditOutcome.NotApplicable:
+                    return await AbortAsync(
+                        tx,
+                        OperationFailure.Validation([new FieldError("creditOverride", CustomerCredit.NotApplicable)]),
+                        cancellationToken);
+                case CreditOutcome.ReasonRequired:
+                    return await AbortAsync(
+                        tx,
+                        OperationFailure.Validation([new FieldError("creditOverrideReason", CustomerCredit.ReasonRequired)]),
+                        cancellationToken);
+                case CreditOutcome.Exceeded:
+                    return await AbortAsync(
+                        tx,
+                        CreditRejected(customer.CreditLimit!.Value, outstanding, decision.ProjectedOutstanding, draft.Total, initialPayment),
+                        cancellationToken);
+                case CreditOutcome.Override:
+                    creditSnapshot = decision.Snapshot;
+                    break;
+            }
+        }
+
         await productLock.AfterProductLockAsync(cancellationToken);
 
         var location = await database.StockLocations.SingleOrDefaultAsync(
@@ -351,6 +423,13 @@ public sealed class SalesService(
             CustomerId = customer?.Id,
             CustomerName = customer?.Name,
             CustomerType = customer?.Type,
+            CreditLimitOverridden = creditSnapshot is not null,
+            CreditOverrideReason = creditSnapshot?.Reason,
+            CreditOverrideByUserId = creditSnapshot is null ? null : userId,
+            CreditOverrideAtUtc = creditSnapshot is null ? null : createdAt,
+            CreditLimitSnapshot = creditSnapshot?.Limit,
+            CreditOutstandingBefore = creditSnapshot?.OutstandingBefore,
+            CreditProjectedOutstanding = creditSnapshot?.ProjectedOutstanding,
             Lines = lines,
             Payments = draft.Payments.Select(payment => new SalePayment
             {
@@ -444,7 +523,9 @@ public sealed class SalesService(
         }
 
         var returned = await ReturnedAmountAsync(companyId, sale.Id, cancellationToken);
-        return Result<SaleResponse>.Success(ToResponse(sale, returned));
+        var refunded = await RefundedAmountAsync(companyId, sale.Id, cancellationToken);
+        var returnedByLine = await ReturnedByLineAsync(companyId, sale.Id, cancellationToken);
+        return Result<SaleResponse>.Success(ToResponse(sale, returned, refunded, returnedByLine));
     }
 
     private async Task<ClaimSave> SaveClaimAsync(CancellationToken cancellationToken)
@@ -555,7 +636,8 @@ public sealed class SalesService(
             .Where(item => item.SaleId == saleId && item.CompanyId == company.Id)
             .SumAsync(item => (decimal?)item.Amount, cancellationToken) ?? 0m;
         var returned = await ReturnedAmountAsync(company.Id, saleId, cancellationToken);
-        if (!SaleBalances.TryDerive(locked.Total, returned, paid, out var current))
+        var refunded = await RefundedAmountAsync(company.Id, saleId, cancellationToken);
+        if (!SaleBalances.TryDerive(locked.Total, returned, paid, refunded, out var current))
         {
             return await AbortPaymentAsync(tx, OperationFailure.Of(409, ErrorCodes.SalePaymentIntegrity), cancellationToken);
         }
@@ -582,7 +664,7 @@ public sealed class SalesService(
             ReceivedByUserId = userId,
         };
         database.SalePayments.Add(payment);
-        if (!SaleBalances.TryDerive(locked.Total, returned, paid + draft.Amount, out var updated))
+        if (!SaleBalances.TryDerive(locked.Total, returned, paid + draft.Amount, refunded, out var updated))
         {
             return await AbortPaymentAsync(tx, OperationFailure.Of(409, ErrorCodes.SalePaymentIntegrity), cancellationToken);
         }
@@ -591,6 +673,7 @@ public sealed class SalesService(
             saleId,
             saleRef.Number,
             QuantityText.Format(updated.Paid),
+            QuantityText.Format(refunded),
             QuantityText.Format(updated.Outstanding),
             updated.State,
             new SalePaymentResponse(
@@ -621,6 +704,421 @@ public sealed class SalesService(
 
             return await AbortPaymentAsync(tx, mapped, cancellationToken);
         }
+    }
+
+    public async Task<Result<SaleReturnPostResponse>> PostReturnAsync(
+        Guid saleId,
+        SaleReturnPostRequest request,
+        Guid idempotencyKey,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var requestedLines = request.Lines?.Select(line => (line.SaleLineId, line.Quantity)).ToArray();
+        var requestedRefunds = request.Refunds?
+            .Select(refund => (refund.Method, refund.Amount, refund.Reference, refund.Notes))
+            .ToArray();
+        if (!SaleReturnPosting.TryNormalize(
+                request.Reason,
+                requestedLines,
+                requestedRefunds,
+                out var draft,
+                out var requestErrors))
+        {
+            return Result<SaleReturnPostResponse>.Fail(OperationFailure.Validation(requestErrors));
+        }
+
+        var hash = Fingerprint(SaleOperations.SaleReturn, ReturnCanonical(saleId, draft));
+        await using var tx = await database.Database.BeginTransactionAsync(cancellationToken);
+        var company = await database.Companies.SingleOrDefaultAsync(cancellationToken);
+        if (company is null)
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Of(404, ErrorCodes.CompanyMissing), cancellationToken);
+        }
+
+        var claim = new SaleIdempotency
+        {
+            Id = Guid.CreateVersion7(),
+            CompanyId = company.Id,
+            Operation = SaleOperations.SaleReturn,
+            IdempotencyKey = idempotencyKey,
+            RequestHash = hash,
+            ResponseJson = "",
+            CreatedAtUtc = time.GetUtcNow(),
+        };
+        database.SaleIdempotencies.Add(claim);
+        var claimed = await SaveClaimAsync(cancellationToken);
+        if (claimed == ClaimSave.Conflict)
+        {
+            database.ChangeTracker.Clear();
+            await tx.RollbackAsync(cancellationToken);
+            return await ReplayReturnAsync(company.Id, idempotencyKey, hash, cancellationToken);
+        }
+
+        if (claimed == ClaimSave.Failed)
+        {
+            return await AbortReturnAsync(tx, UnexpectedFailure(), cancellationToken);
+        }
+
+        var saleRef = await database.Sales.AsNoTracking()
+            .Where(item => item.Id == saleId && item.CompanyId == company.Id)
+            .Select(item => new { item.Id, item.CustomerId, item.Total })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (saleRef is null)
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Of(404, ErrorCodes.SaleNotFound), cancellationToken);
+        }
+
+        if (saleRef.CustomerId is Guid customerId)
+        {
+            await database.Database.ExecuteSqlInterpolatedAsync(
+                $"""SELECT 1 FROM pexilio.customer WHERE "CompanyId" = {company.Id} AND "Id" = {customerId} FOR UPDATE""",
+                cancellationToken);
+            var customerExists = await database.Customers.AsNoTracking()
+                .AnyAsync(item => item.Id == customerId && item.CompanyId == company.Id, cancellationToken);
+            if (!customerExists)
+            {
+                return await AbortReturnAsync(tx, OperationFailure.Of(404, ErrorCodes.CustomerNotFound), cancellationToken);
+            }
+        }
+
+        await database.Database.ExecuteSqlInterpolatedAsync(
+            $"""SELECT 1 FROM pexilio.sale WHERE "CompanyId" = {company.Id} AND "Id" = {saleId} FOR UPDATE""",
+            cancellationToken);
+        var locked = await database.Sales.AsNoTracking()
+            .Where(item => item.Id == saleId && item.CompanyId == company.Id)
+            .Select(item => new { item.Total })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (locked is null)
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Of(404, ErrorCodes.SaleNotFound), cancellationToken);
+        }
+
+        var saleLines = await database.SaleLines.AsNoTracking()
+            .Where(line => line.SaleId == saleId && line.CompanyId == company.Id)
+            .ToListAsync(cancellationToken);
+        var productIds = saleLines
+            .Where(line => draft.Lines.Any(requested => requested.SaleLineId == line.Id))
+            .Select(line => line.ProductId)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToArray();
+        foreach (var productId in productIds)
+        {
+            await database.Database.ExecuteSqlInterpolatedAsync(
+                $"""SELECT 1 FROM pexilio.product WHERE "CompanyId" = {company.Id} AND "Id" = {productId} FOR UPDATE""",
+                cancellationToken);
+        }
+
+        await productLock.AfterProductLockAsync(cancellationToken);
+
+        var previous = await database.SaleReturnLines.AsNoTracking()
+            .Where(line => line.CompanyId == company.Id && line.SaleId == saleId)
+            .GroupBy(line => line.SaleLineId)
+            .Select(group => new
+            {
+                SaleLineId = group.Key,
+                Quantity = group.Sum(line => line.Quantity),
+                Amount = group.Sum(line => line.Amount),
+            })
+            .ToListAsync(cancellationToken);
+        var returned = await ReturnedAmountAsync(company.Id, saleId, cancellationToken);
+        var paid = await database.SalePayments.AsNoTracking()
+            .Where(payment => payment.SaleId == saleId && payment.CompanyId == company.Id)
+            .SumAsync(payment => (decimal?)payment.Amount, cancellationToken) ?? 0m;
+        var refunded = await RefundedAmountAsync(company.Id, saleId, cancellationToken);
+        if (!SaleBalances.TryDerive(locked.Total, returned, paid, refunded, out var current))
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Of(409, ErrorCodes.SalePaymentIntegrity), cancellationToken);
+        }
+
+        var lineErrors = new List<FieldError>();
+        var inputs = new List<ReturnLineInput>(draft.Lines.Count);
+        var seen = new HashSet<Guid>();
+        for (var index = 0; index < draft.Lines.Count; index++)
+        {
+            var requested = draft.Lines[index];
+            var prefix = $"lines[{index}]";
+            if (!seen.Add(requested.SaleLineId))
+            {
+                lineErrors.Add(new FieldError($"{prefix}.saleLineId", "lines.duplicate"));
+                continue;
+            }
+
+            var saleLine = saleLines.SingleOrDefault(line => line.Id == requested.SaleLineId);
+            if (saleLine is null)
+            {
+                lineErrors.Add(new FieldError($"{prefix}.saleLineId", "saleLine.unknown"));
+                continue;
+            }
+
+            var prior = previous.SingleOrDefault(item => item.SaleLineId == saleLine.Id);
+            inputs.Add(new ReturnLineInput(
+                saleLine.Id,
+                saleLine.Quantity,
+                saleLine.LineTotal,
+                saleLine.AllocatedSaleDiscount,
+                prior?.Quantity ?? 0m,
+                prior?.Amount ?? 0m,
+                requested.Quantity));
+        }
+
+        IReadOnlyList<ReturnLineValuation> valuations = [];
+        var returnAmount = 0m;
+        if (lineErrors.Count == 0
+            && !SaleReturnRules.TryValueLines(inputs, out valuations, out returnAmount, out var valueErrors))
+        {
+            lineErrors.AddRange(valueErrors);
+        }
+
+        if (lineErrors.Count > 0)
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Validation(lineErrors), cancellationToken);
+        }
+
+        var unrefundedCollected = paid - refunded;
+        if (!SaleRefundRules.TryQuote(returnAmount, current.Outstanding, unrefundedCollected, out var quote, out var quoteErrors))
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Validation(quoteErrors), cancellationToken);
+        }
+
+        var tenderInputs = draft.Refunds.Select(tender => (tender.Method, tender.Amount)).ToArray();
+        if (!SaleRefundRules.TryTenders(quote.RequiredRefund, tenderInputs, out var tenders, out var tenderErrors))
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Validation(tenderErrors), cancellationToken);
+        }
+
+        if (!SaleBalances.TryDerive(
+                locked.Total,
+                returned + returnAmount,
+                paid,
+                refunded + quote.RequiredRefund,
+                out var updated))
+        {
+            return await AbortReturnAsync(tx, OperationFailure.Of(409, ErrorCodes.SalePaymentIntegrity), cancellationToken);
+        }
+
+        var returnedAt = time.GetUtcNow();
+        var returnId = Guid.CreateVersion7();
+        var number = await AllocateSeriesAsync(
+            company.Id,
+            SaleNumbers.ReturnSeries,
+            SaleNumbers.FormatReturn,
+            cancellationToken);
+        var postedLines = new List<SaleReturnLine>(valuations.Count);
+        foreach (var valuation in valuations)
+        {
+            var saleLine = saleLines.Single(line => line.Id == valuation.SaleLineId);
+            postedLines.Add(new SaleReturnLine
+            {
+                Id = Guid.CreateVersion7(),
+                ReturnId = returnId,
+                SaleId = saleId,
+                SaleLineId = saleLine.Id,
+                CompanyId = company.Id,
+                ProductId = saleLine.ProductId,
+                Quantity = valuation.Quantity,
+                Amount = valuation.Amount,
+                TracksStock = saleLine.TracksStock,
+                StockMovementId = saleLine.TracksStock ? Guid.CreateVersion7() : null,
+            });
+        }
+
+        var postedRefunds = new List<SaleRefund>(tenders.Count);
+        for (var index = 0; index < tenders.Count; index++)
+        {
+            var tender = tenders[index];
+            var source = draft.Refunds[index];
+            postedRefunds.Add(new SaleRefund
+            {
+                Id = Guid.CreateVersion7(),
+                CompanyId = company.Id,
+                SaleId = saleId,
+                SaleReturnId = returnId,
+                Amount = tender.Amount,
+                Method = tender.Method,
+                Reference = source.Reference,
+                Notes = source.Notes,
+                RefundedAtUtc = returnedAt,
+                RefundedByUserId = userId,
+            });
+        }
+
+        var saleReturn = new SaleReturn
+        {
+            Id = returnId,
+            CompanyId = company.Id,
+            SaleId = saleId,
+            Number = number,
+            Reason = draft.Reason,
+            ReturnedAtUtc = returnedAt,
+            ReturnedByUserId = userId,
+            Lines = postedLines,
+            Refunds = postedRefunds,
+        };
+        database.SaleReturns.Add(saleReturn);
+        var stockReason = ReturnReason(number);
+        foreach (var line in postedLines.Where(line => line.TracksStock).OrderBy(line => line.ProductId))
+        {
+            Result<StockMovement> posted;
+            try
+            {
+                posted = await stock.PostInCurrentTransactionAsync(
+                    StockMovementTypes.SaleReturn,
+                    line.ProductId,
+                    line.Quantity,
+                    stockReason,
+                    null,
+                    userId,
+                    StockSourceTypes.SaleReturn,
+                    line.Id,
+                    cancellationToken,
+                    line.StockMovementId);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return await FailReturnAsync(tx, exception, cancellationToken);
+            }
+
+            if (posted.Error is not null || posted.Value is null)
+            {
+                return await AbortReturnAsync(
+                    tx,
+                    posted.Error ?? OperationFailure.Of(409, ErrorCodes.StockReconciliation),
+                    cancellationToken);
+            }
+        }
+
+        var response = ToReturnResponse(saleReturn, quote, updated, refunded + quote.RequiredRefund);
+        claim.SaleId = saleId;
+        claim.ResponseJson = JsonSerializer.Serialize(response, JsonOptions);
+        try
+        {
+            await database.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+            return Result<SaleReturnPostResponse>.Success(response);
+        }
+        catch (Exception exception) when (exception is DbUpdateException or PostgresException)
+        {
+            return await FailReturnAsync(tx, exception, cancellationToken);
+        }
+    }
+
+    private async Task<Result<SaleReturnPostResponse>> ReplayReturnAsync(
+        Guid companyId,
+        Guid idempotencyKey,
+        string hash,
+        CancellationToken cancellationToken)
+    {
+        var claim = await database.SaleIdempotencies.AsNoTracking().SingleOrDefaultAsync(
+            item => item.CompanyId == companyId
+                && item.Operation == SaleOperations.SaleReturn
+                && item.IdempotencyKey == idempotencyKey,
+            cancellationToken);
+        if (claim is null || claim.RequestHash != hash || string.IsNullOrEmpty(claim.ResponseJson))
+        {
+            return Result<SaleReturnPostResponse>.Fail(OperationFailure.Of(409, ErrorCodes.SaleIdempotencyConflict));
+        }
+
+        var stored = JsonSerializer.Deserialize<SaleReturnPostResponse>(claim.ResponseJson, JsonOptions);
+        return stored is null
+            ? Result<SaleReturnPostResponse>.Fail(OperationFailure.Of(409, ErrorCodes.SaleIdempotencyConflict))
+            : Result<SaleReturnPostResponse>.Success(stored);
+    }
+
+    private async Task<Result<SaleReturnPostResponse>> AbortReturnAsync(
+        IDbContextTransaction tx,
+        OperationFailure error,
+        CancellationToken cancellationToken)
+    {
+        database.ChangeTracker.Clear();
+        if (database.Database.CurrentTransaction is not null)
+        {
+            await tx.RollbackAsync(cancellationToken);
+        }
+
+        return Result<SaleReturnPostResponse>.Fail(error);
+    }
+
+    private async Task<Result<SaleReturnPostResponse>> FailReturnAsync(
+        IDbContextTransaction tx,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        var mapped = MapWrite(exception);
+        if (mapped is null)
+        {
+            logger.LogError(exception, "Sale return failed.");
+            mapped = UnexpectedFailure();
+        }
+
+        return await AbortReturnAsync(tx, mapped, cancellationToken);
+    }
+
+    private static string ReturnCanonical(Guid saleId, SaleReturnDraft draft)
+    {
+        var parts = new List<string> { saleId.ToString("D"), draft.Reason };
+        foreach (var line in draft.Lines)
+        {
+            parts.Add(line.SaleLineId.ToString("D"));
+            parts.Add(QuantityText.Format(line.Quantity));
+        }
+
+        foreach (var refund in draft.Refunds)
+        {
+            parts.Add(refund.Method ?? "");
+            parts.Add(QuantityText.Format(refund.Amount));
+            parts.Add(refund.Reference ?? "");
+            parts.Add(refund.Notes ?? "");
+        }
+
+        return string.Join('\u001f', parts);
+    }
+
+    private static string ReturnReason(string number)
+    {
+        var reason = "Retour " + number;
+        return reason.Length <= StockRules.ReasonMaxLength ? reason : reason[..StockRules.ReasonMaxLength];
+    }
+
+    private static SaleReturnPostResponse ToReturnResponse(
+        SaleReturn saleReturn,
+        SaleRefundQuote quote,
+        SaleBalance balance,
+        decimal refunded)
+    {
+        return new SaleReturnPostResponse(
+            saleReturn.Id,
+            saleReturn.SaleId,
+            saleReturn.Number,
+            saleReturn.Reason,
+            saleReturn.ReturnedAtUtc,
+            QuantityText.Format(quote.ReturnAmount),
+            QuantityText.Format(quote.RequiredRefund),
+            QuantityText.Format(quote.NetAccountReduction),
+            QuantityText.Format(balance.Paid),
+            QuantityText.Format(refunded),
+            QuantityText.Format(balance.Outstanding),
+            balance.State,
+            saleReturn.Lines
+                .Select(line => new SaleReturnLineResponse(
+                    line.Id,
+                    line.SaleLineId,
+                    line.ProductId,
+                    QuantityText.Format(line.Quantity),
+                    QuantityText.Format(line.Amount),
+                    line.TracksStock,
+                    line.StockMovementId))
+                .ToList(),
+            saleReturn.Refunds
+                .Select(refund => new SaleRefundResponse(
+                    refund.Id,
+                    refund.Method,
+                    QuantityText.Format(refund.Amount),
+                    refund.Reference,
+                    refund.Notes,
+                    refund.RefundedAtUtc,
+                    refund.RefundedByUserId))
+                .ToList());
     }
 
     private async Task<Result<SalePaymentPostResponse>> ReplayPaymentAsync(
@@ -670,7 +1168,14 @@ public sealed class SalesService(
             draft.Notes ?? "");
     }
 
-    private async Task<string> AllocateReceiptAsync(Guid companyId, CancellationToken cancellationToken)
+    private Task<string> AllocateReceiptAsync(Guid companyId, CancellationToken cancellationToken) =>
+        AllocateSeriesAsync(companyId, PaymentReceiptNumbers.Series, PaymentReceiptNumbers.Format, cancellationToken);
+
+    private async Task<string> AllocateSeriesAsync(
+        Guid companyId,
+        string series,
+        Func<long, string> format,
+        CancellationToken cancellationToken)
     {
         var connection = database.Database.GetDbConnection();
         if (connection.State != ConnectionState.Open)
@@ -693,10 +1198,10 @@ public sealed class SalesService(
         command.Parameters.Add(companyParameter);
         var seriesParameter = command.CreateParameter();
         seriesParameter.ParameterName = "series";
-        seriesParameter.Value = PaymentReceiptNumbers.Series;
+        seriesParameter.Value = series;
         command.Parameters.Add(seriesParameter);
         var value = await command.ExecuteScalarAsync(cancellationToken);
-        return PaymentReceiptNumbers.Format(Convert.ToInt64(value, CultureInfo.InvariantCulture));
+        return format(Convert.ToInt64(value, CultureInfo.InvariantCulture));
     }
 
     private async Task<string> NextNumberAsync(
@@ -745,9 +1250,34 @@ public sealed class SalesService(
             .Where(line => line.CompanyId == companyId && line.SaleId == saleId)
             .SumAsync(line => (decimal?)line.Amount, cancellationToken) ?? 0m;
 
-    private static SaleBalance Balance(decimal total, decimal returned, decimal paid)
+    private async Task<IReadOnlyDictionary<Guid, SaleLineReturnTotals>> ReturnedByLineAsync(
+        Guid companyId,
+        Guid saleId,
+        CancellationToken cancellationToken)
     {
-        if (!SaleBalances.TryDerive(total, returned, paid, out var balance))
+        var rows = await database.SaleReturnLines.AsNoTracking()
+            .Where(line => line.CompanyId == companyId && line.SaleId == saleId)
+            .GroupBy(line => line.SaleLineId)
+            .Select(group => new
+            {
+                SaleLineId = group.Key,
+                Quantity = group.Sum(line => line.Quantity),
+                Amount = group.Sum(line => line.Amount),
+            })
+            .ToListAsync(cancellationToken);
+        return rows.ToDictionary(
+            row => row.SaleLineId,
+            row => new SaleLineReturnTotals(row.Quantity, row.Amount));
+    }
+
+    private async Task<decimal> RefundedAmountAsync(Guid companyId, Guid saleId, CancellationToken cancellationToken) =>
+        await database.SaleRefunds.AsNoTracking()
+            .Where(refund => refund.CompanyId == companyId && refund.SaleId == saleId)
+            .SumAsync(refund => (decimal?)refund.Amount, cancellationToken) ?? 0m;
+
+    private static SaleBalance Balance(decimal total, decimal returned, decimal paid, decimal refunded = 0m)
+    {
+        if (!SaleBalances.TryDerive(total, returned, paid, refunded, out var balance))
         {
             throw new InvalidOperationException("The sale balance is inconsistent.");
         }
@@ -755,9 +1285,14 @@ public sealed class SalesService(
         return balance;
     }
 
-    private static SaleResponse ToResponse(Sale sale, decimal returned)
+    private static SaleResponse ToResponse(
+        Sale sale,
+        decimal returned,
+        decimal refunded = 0m,
+        IReadOnlyDictionary<Guid, SaleLineReturnTotals>? returnedByLine = null)
     {
-        var balance = Balance(sale.Total, returned, sale.Payments.Sum(payment => payment.Amount));
+        var byLine = returnedByLine ?? new Dictionary<Guid, SaleLineReturnTotals>();
+        var balance = Balance(sale.Total, returned, sale.Payments.Sum(payment => payment.Amount), refunded);
         return new SaleResponse(
             sale.Id,
             sale.Number,
@@ -771,26 +1306,40 @@ public sealed class SalesService(
             sale.CreatedByUserId,
             sale.Lines
                 .OrderBy(line => line.LineNumber)
-                .Select(line => new SaleLineResponse(
-                    line.Id,
-                    line.LineNumber,
-                    line.ProductId,
-                    line.ProductSku,
-                    line.ProductName,
-                    line.ProductUnit,
-                    QuantityText.Format(line.Quantity),
-                    UnitPriceText.Format(line.ListUnitPrice),
-                    UnitPriceText.Format(line.UnitPrice),
-                    QuantityText.Format(line.LineTotal),
-                    line.TracksStock,
-                    line.StockMovementId,
-                    line.TaxRate.ToString("0.000000", CultureInfo.InvariantCulture),
-                    line.PriceKind,
-                    QuantityText.Format(line.LineDiscount),
-                    QuantityText.Format(line.AllocatedSaleDiscount),
-                    line.DiscountKind,
-                    line.DiscountRate is decimal lineRate ? UnitPriceText.Format(lineRate) : null,
-                    line.BelowMinimumOverride))
+                .Select(line =>
+                {
+                    byLine.TryGetValue(line.Id, out var returnedLine);
+                    var history = SaleLineReturnHistoryRules.Summarize(
+                        line.Quantity,
+                        line.LineTotal,
+                        line.AllocatedSaleDiscount,
+                        returnedLine.Quantity,
+                        returnedLine.Amount);
+                    return new SaleLineResponse(
+                        line.Id,
+                        line.LineNumber,
+                        line.ProductId,
+                        line.ProductSku,
+                        line.ProductName,
+                        line.ProductUnit,
+                        QuantityText.Format(line.Quantity),
+                        UnitPriceText.Format(line.ListUnitPrice),
+                        UnitPriceText.Format(line.UnitPrice),
+                        QuantityText.Format(line.LineTotal),
+                        line.TracksStock,
+                        line.StockMovementId,
+                        line.TaxRate.ToString("0.000000", CultureInfo.InvariantCulture),
+                        line.PriceKind,
+                        QuantityText.Format(line.LineDiscount),
+                        QuantityText.Format(line.AllocatedSaleDiscount),
+                        line.DiscountKind,
+                        line.DiscountRate is decimal lineRate ? UnitPriceText.Format(lineRate) : null,
+                        line.BelowMinimumOverride,
+                        QuantityText.Format(history.ReturnedQuantity),
+                        QuantityText.Format(history.RemainingReturnableQuantity),
+                        QuantityText.Format(history.ReturnedAmount),
+                        QuantityText.Format(history.RemainingReturnableAmount));
+                })
                 .ToList(),
             sale.Payments
                 .OrderBy(payment => payment.PaidAtUtc)
@@ -809,11 +1358,41 @@ public sealed class SalesService(
             sale.CustomerName,
             sale.CustomerType,
             QuantityText.Format(balance.Paid),
+            QuantityText.Format(refunded),
             QuantityText.Format(balance.Outstanding),
-            balance.State);
+            balance.State,
+            sale.CreditLimitOverridden,
+            sale.CreditOverrideReason,
+            FormatLimit(sale.CreditLimitSnapshot),
+            FormatAmount(sale.CreditOutstandingBefore),
+            FormatAmount(sale.CreditProjectedOutstanding));
     }
 
-    private static string Canonical(SaleDraft draft, Guid? customerId)
+    private static string? FormatLimit(decimal? amount) =>
+        amount is decimal value ? UnitPriceText.Format(value) : null;
+
+    private static string? FormatAmount(decimal? amount) =>
+        amount is decimal value ? QuantityText.Format(value) : null;
+
+    private static OperationFailure CreditRejected(
+        decimal limit,
+        decimal outstanding,
+        decimal projected,
+        decimal saleTotal,
+        decimal initialPayment) =>
+        OperationFailure.Of(
+            409,
+            ErrorCodes.CreditLimitExceeded,
+            new Dictionary<string, string>
+            {
+                ["creditLimit"] = UnitPriceText.Format(limit),
+                ["outstanding"] = QuantityText.Format(outstanding),
+                ["projected"] = QuantityText.Format(projected),
+                ["saleTotal"] = QuantityText.Format(saleTotal),
+                ["initialPayment"] = QuantityText.Format(initialPayment),
+            });
+
+    private static string Canonical(SaleDraft draft, Guid? customerId, bool creditOverride, string? creditReason)
     {
         var parts = new List<string> { QuantityText.Format(draft.Total) };
         if (draft.Extended)
@@ -855,6 +1434,14 @@ public sealed class SalesService(
         if (customerId is Guid linked)
         {
             parts.Add(linked.ToString("D"));
+        }
+
+        // Default requests keep the historical fingerprint. An override flag or a reason is the
+        // only addition, so a retry with a different decision cannot replay the original sale.
+        if (creditOverride || creditReason is not null)
+        {
+            parts.Add(creditOverride ? "1" : "0");
+            parts.Add(creditReason ?? "");
         }
 
         return string.Join('\u001f', parts);

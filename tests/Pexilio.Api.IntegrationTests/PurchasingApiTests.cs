@@ -40,7 +40,7 @@ public sealed class PurchasingApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
         await using var scope = _factory.Services.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<PexilioDbContext>();
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
         Assert.Equal(1, await database.StockMovements.CountAsync());
         Assert.Equal(10.0000m, await database.StockBalances.Select(balance => balance.Quantity).SingleAsync());
         Assert.Equal(19.5000m, await database.Products.Select(item => item.UnitPrice).SingleAsync());
@@ -231,7 +231,7 @@ public sealed class PurchasingApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/v1/purchases/{created.Id}")).StatusCode);
         await using var scope = _factory.Services.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<PexilioDbContext>();
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
         Assert.Equal(0, await database.Purchases.CountAsync());
         Assert.Equal(0, await database.PurchaseLines.CountAsync());
         Assert.Equal(1, await database.PurchaseIdempotencies.CountAsync(item => item.Operation == PurchaseOperations.PurchaseCreate));
@@ -375,7 +375,7 @@ public sealed class PurchasingApiTests : IAsyncLifetime
         Assert.Equal("2.0000", current.Lines.Single().QuantityOrdered);
         await using var scope = _factory.Services.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<PexilioDbContext>();
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
         Assert.Equal(1, await database.Purchases.CountAsync());
         Assert.Equal(1, await database.PurchaseLines.CountAsync());
         Assert.Equal(0, await database.StockMovements.CountAsync());
@@ -400,7 +400,7 @@ public sealed class PurchasingApiTests : IAsyncLifetime
         Assert.Equal("idempotencyKey.empty", Assert.Single(body.Errors["idempotencyKey"]));
         await using var scope = _factory.Services.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<PexilioDbContext>();
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
         Assert.Equal(0, await database.Purchases.CountAsync());
         Assert.Equal(0, await database.PurchaseIdempotencies.CountAsync());
     }

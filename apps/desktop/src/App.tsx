@@ -45,6 +45,7 @@ export default function App({
   const [taxRate, setTaxRate] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [salesRevision, setSalesRevision] = useState(0);
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -246,6 +247,7 @@ export default function App({
               fetcher={fetcher}
               locale={locale}
               administrator={isAdministrator(session.accessToken)}
+              onSalesChanged={() => setSalesRevision((current) => current + 1)}
             />
             <CustomersPanel
               apiBaseUrl={apiBaseUrl}
@@ -253,6 +255,7 @@ export default function App({
               fetcher={fetcher}
               locale={locale}
               administrator={isAdministrator(session.accessToken)}
+              revision={salesRevision}
             />
             <CatalogPanel
               apiBaseUrl={apiBaseUrl}

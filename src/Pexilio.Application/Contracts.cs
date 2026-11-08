@@ -223,7 +223,12 @@ public sealed record CustomerStatementLineResponse(
     Guid DocumentId,
     string? DocumentNumber,
     string Amount,
-    string RunningBalance);
+    string RunningBalance,
+    bool? CreditLimitOverridden = null,
+    string? CreditOverrideReason = null,
+    string? CreditLimitSnapshot = null,
+    string? CreditOutstandingBefore = null,
+    string? CreditProjectedOutstanding = null);
 
 public sealed record CustomerStatementResponse(
     Guid CustomerId,
@@ -374,6 +379,10 @@ public sealed class SaleFinalizeRequest
     public List<SalePaymentRequest>? Payments { get; set; }
 
     public Guid? CustomerId { get; set; }
+
+    public bool CreditOverride { get; set; }
+
+    public string? CreditOverrideReason { get; set; }
 }
 
 public sealed record SaleLineResponse(
@@ -395,7 +404,11 @@ public sealed record SaleLineResponse(
     string AllocatedSaleDiscount,
     string DiscountKind,
     string? DiscountRate,
-    bool BelowMinimumOverride);
+    bool BelowMinimumOverride,
+    string ReturnedQuantity,
+    string RemainingReturnableQuantity,
+    string ReturnedAmount,
+    string RemainingReturnableAmount);
 
 public sealed class SalePaymentPostRequest
 {
@@ -406,6 +419,33 @@ public sealed class SalePaymentPostRequest
     public string? Reference { get; set; }
 
     public string? Notes { get; set; }
+}
+
+public sealed class SaleReturnLineRequest
+{
+    public Guid SaleLineId { get; set; }
+
+    public string? Quantity { get; set; }
+}
+
+public sealed class SaleRefundTenderRequest
+{
+    public string? Method { get; set; }
+
+    public string? Amount { get; set; }
+
+    public string? Reference { get; set; }
+
+    public string? Notes { get; set; }
+}
+
+public sealed class SaleReturnPostRequest
+{
+    public string? Reason { get; set; }
+
+    public List<SaleReturnLineRequest>? Lines { get; set; }
+
+    public List<SaleRefundTenderRequest>? Refunds { get; set; }
 }
 
 public sealed record SalePaymentResponse(
@@ -422,9 +462,44 @@ public sealed record SalePaymentPostResponse(
     Guid SaleId,
     string SaleNumber,
     string PaidAmount,
+    string RefundedAmount,
     string OutstandingAmount,
     string PaymentState,
     SalePaymentResponse Payment);
+
+public sealed record SaleReturnLineResponse(
+    Guid Id,
+    Guid SaleLineId,
+    Guid ProductId,
+    string Quantity,
+    string Amount,
+    bool TracksStock,
+    Guid? StockMovementId);
+
+public sealed record SaleRefundResponse(
+    Guid Id,
+    string Method,
+    string Amount,
+    string? Reference,
+    string? Notes,
+    DateTimeOffset RefundedAt,
+    Guid RefundedBy);
+
+public sealed record SaleReturnPostResponse(
+    Guid Id,
+    Guid SaleId,
+    string Number,
+    string Reason,
+    DateTimeOffset ReturnedAt,
+    string ReturnAmount,
+    string RequiredRefund,
+    string NetAccountReduction,
+    string PaidAmount,
+    string RefundedAmount,
+    string OutstandingAmount,
+    string PaymentState,
+    IReadOnlyList<SaleReturnLineResponse> Lines,
+    IReadOnlyList<SaleRefundResponse> Refunds);
 
 public sealed record SaleResponse(
     Guid Id,
@@ -443,8 +518,14 @@ public sealed record SaleResponse(
     string? CustomerName,
     string? CustomerType,
     string PaidAmount,
+    string RefundedAmount,
     string OutstandingAmount,
-    string PaymentState);
+    string PaymentState,
+    bool CreditLimitOverridden,
+    string? CreditOverrideReason,
+    string? CreditLimitSnapshot,
+    string? CreditOutstandingBefore,
+    string? CreditProjectedOutstanding);
 
 public sealed record SaleSummaryResponse(
     Guid Id,
@@ -454,8 +535,14 @@ public sealed record SaleSummaryResponse(
     Guid? CustomerId,
     string? CustomerName,
     string PaidAmount,
+    string RefundedAmount,
     string OutstandingAmount,
-    string PaymentState);
+    string PaymentState,
+    bool CreditLimitOverridden,
+    string? CreditOverrideReason,
+    string? CreditLimitSnapshot,
+    string? CreditOutstandingBefore,
+    string? CreditProjectedOutstanding);
 
 public sealed record CompanyResponse(
     Guid Id,

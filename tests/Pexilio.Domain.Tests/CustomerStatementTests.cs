@@ -196,4 +196,114 @@ public sealed class CustomerStatementTests
 
         Assert.False(projected);
     }
+
+    [Fact]
+    public void An_unpaid_return_reduces_the_balance_by_the_full_return()
+    {
+        var saved = CustomerStatementMath.TryNetReturn(4.0000m, 0m, out var reduction, out var signed);
+        var projected = CustomerStatementMath.TryProject(
+            10.0000m,
+            [new(November, CustomerStatementMath.ReturnKind, Guid.Parse("00000000-0000-0000-0000-000000000004"), signed)],
+            out var closing,
+            out var running);
+
+        Assert.True(saved);
+        Assert.Equal(4.0000m, reduction);
+        Assert.Equal(-4.0000m, signed);
+        Assert.True(projected);
+        Assert.Equal([6.0000m], running);
+        Assert.Equal(6.0000m, closing);
+    }
+
+    [Fact]
+    public void A_partial_refund_reduces_the_balance_only_by_the_unrefunded_portion()
+    {
+        var saved = CustomerStatementMath.TryNetReturn(6.0000m, 2.0000m, out var reduction, out var signed);
+
+        Assert.True(saved);
+        Assert.Equal(4.0000m, reduction);
+        Assert.Equal(-4.0000m, signed);
+    }
+
+    [Fact]
+    public void A_fully_refunded_return_posts_one_zero_reduction()
+    {
+        var saved = CustomerStatementMath.TryNetReturn(6.0000m, 6.0000m, out var reduction, out var signed);
+        var projected = CustomerStatementMath.TryProject(
+            0m,
+            [new(November, CustomerStatementMath.ReturnKind, Guid.Parse("00000000-0000-0000-0000-000000000006"), signed)],
+            out var closing,
+            out var running);
+
+        Assert.True(saved);
+        Assert.Equal(0m, reduction);
+        Assert.Equal(0m, signed);
+        Assert.True(projected);
+        Assert.Equal([0m], running);
+        Assert.Equal(0m, closing);
+        Assert.Equal(9, CustomerStatementMath.KindRank("refund"));
+    }
+
+    [Fact]
+    public void Several_refund_tenders_become_one_return_movement()
+    {
+        var when = new DateTimeOffset(2026, 11, 2, 9, 0, 0, TimeSpan.Zero);
+        var returnId = Guid.Parse("00000000-0000-0000-0000-000000000008");
+        var summed = CustomerStatementMath.TryRefundTotal([2.0000m, 1.5000m, 0.5000m], out var refund);
+        var netted = CustomerStatementMath.TryNetReturn(6.0000m, refund, out var reduction, out var signed);
+        var movements = new CustomerStatementMovement[]
+        {
+            new(when, CustomerStatementMath.ReturnKind, returnId, signed),
+        };
+
+        var projected = CustomerStatementMath.TryProject(6.0000m, movements, out var closing, out var running);
+
+        Assert.True(summed);
+        Assert.Equal(4.0000m, refund);
+        Assert.True(netted);
+        Assert.Equal(2.0000m, reduction);
+        Assert.True(projected);
+        Assert.Single(movements);
+        Assert.Equal(CustomerStatementMath.ReturnKind, movements[0].Kind);
+        Assert.Equal([4.0000m], running);
+        Assert.Equal(4.0000m, closing);
+    }
+
+    [Fact]
+    public void Opening_period_closing_and_outstanding_stay_on_one_net_return()
+    {
+        var before = new DateTimeOffset(2026, 11, 1, 8, 0, 0, TimeSpan.Zero);
+        var inside = before.AddDays(1);
+        var sale = Guid.Parse("00000000-0000-0000-0000-000000000010");
+        var payment = Guid.Parse("00000000-0000-0000-0000-000000000011");
+        var returned = Guid.Parse("00000000-0000-0000-0000-000000000012");
+        var netted = CustomerStatementMath.TryNetReturn(6.0000m, 2.0000m, out _, out var signed);
+        var history = new CustomerStatementMovement[]
+        {
+            new(before, CustomerStatementMath.SaleKind, sale, 10.0000m),
+            new(before, CustomerStatementMath.PaymentKind, payment, -6.0000m),
+            new(inside, CustomerStatementMath.ReturnKind, returned, signed),
+        };
+
+        var opened = CustomerStatementMath.TryProject(0m, history.Take(2).ToArray(), out var opening, out _);
+        var period = CustomerStatementMath.TryProject(opening, history.Skip(2).ToArray(), out var closing, out var running);
+        var all = CustomerStatementMath.TryProject(0m, history, out var outstanding, out _);
+
+        Assert.True(netted);
+        Assert.True(opened);
+        Assert.Equal(4.0000m, opening);
+        Assert.True(period);
+        Assert.Equal([0m], running);
+        Assert.Equal(0m, closing);
+        Assert.True(all);
+        Assert.Equal(closing, outstanding);
+    }
+
+    [Fact]
+    public void A_refund_above_the_return_or_an_off_scale_tender_is_rejected()
+    {
+        Assert.False(CustomerStatementMath.TryNetReturn(4.0000m, 4.0001m, out _, out _));
+        Assert.False(CustomerStatementMath.TryRefundTotal([1.0000m, 0m], out _));
+        Assert.False(CustomerStatementMath.TryRefundTotal([1.00001m], out _));
+    }
 }

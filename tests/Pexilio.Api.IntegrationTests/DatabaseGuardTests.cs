@@ -24,6 +24,13 @@ public sealed class DatabaseGuardTests
     }
 
     [Fact]
+    public void Accepts_a_disposable_loopback_database()
+    {
+        DatabaseGuard.EnsureTestDatabase(
+            "Host=127.0.0.1;Port=5432;Database=pexilio_test_phase553;Username=pexilio_dev;Password=not-used");
+    }
+
+    [Fact]
     public void Rejects_a_remote_host()
     {
         Assert.Throws<InvalidOperationException>(() =>

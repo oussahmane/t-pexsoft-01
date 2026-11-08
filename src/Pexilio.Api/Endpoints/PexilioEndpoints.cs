@@ -231,6 +231,34 @@ public static class PexilioEndpoints
             }
         }).RequireAuthorization("sales.write");
 
+        app.MapPost("/api/v1/sales/{id:guid}/returns", async (
+            Guid id,
+            SaleReturnPostRequest request,
+            HttpRequest http,
+            ClaimsPrincipal user,
+            ISalesService sales,
+            ILoggerFactory loggerFactory,
+            CancellationToken cancellationToken) =>
+        {
+            if (!TryUserId(user, out var userId))
+            {
+                return Problem(401, ErrorCodes.AuthenticationRequired);
+            }
+
+            try
+            {
+                return await PostIdempotentAsync(
+                    http,
+                    key => sales.PostReturnAsync(id, request, key, userId, cancellationToken),
+                    created => $"/api/v1/sales/{created.SaleId}/returns/{created.Id}");
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                loggerFactory.CreateLogger("Pexilio.Api.Sales").LogError(exception, "Sale return failed.");
+                return Problem(500, "request.failed");
+            }
+        }).RequireAuthorization("sales.write");
+
         app.MapPost("/api/v1/sales/{id:guid}/payments", async (
             Guid id,
             SalePaymentPostRequest request,

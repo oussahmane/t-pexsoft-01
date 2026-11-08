@@ -17,6 +17,8 @@ import {
 } from "./posCart";
 import { cashSaleRequest, finalizeCashSale, getSale, listSales, postSalePayment, type CashSaleRequest, type SalePaymentMethod } from "./salesClient";
 import { listCustomers, type CustomerRow } from "./customersClient";
+import { SaleReturnPanel } from "./SaleReturnPanel";
+import { loadPending, returnBlockReason, returnEligible, returnStorage } from "./saleReturns";
 
 type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -24,14 +26,19 @@ type SaleSummary = {
   id: string;
   number: string;
   total: string;
+  paidAmount?: string;
+  refundedAmount?: string;
+  outstandingAmount?: string;
 };
 
 type SaleDetail = {
   id: string;
   number: string;
+  status?: string;
   subtotal: string;
   total: string;
   paidAmount?: string;
+  refundedAmount?: string;
   outstandingAmount?: string;
   paymentState?: "unpaid" | "partial" | "paid";
   lines: {
@@ -41,6 +48,12 @@ type SaleDetail = {
     quantity: string;
     unitPrice: string;
     lineTotal: string;
+    allocatedSaleDiscount?: string;
+    tracksStock?: boolean;
+    returnedQuantity?: string;
+    remainingReturnableQuantity?: string;
+    returnedAmount?: string;
+    remainingReturnableAmount?: string;
   }[];
   payments: {
     id?: string;
@@ -68,6 +81,9 @@ type PosPanelProps = {
   locale: Locale;
   administrator?: boolean;
   createKey?: () => string;
+  storage?: Storage | null;
+  returnTimeoutMs?: number;
+  onSalesChanged?: (customerId: string | null) => void;
 };
 
 type Attempt = {
@@ -82,6 +98,9 @@ export function PosPanel({
   locale,
   administrator = false,
   createKey = () => crypto.randomUUID(),
+  storage = returnStorage(),
+  returnTimeoutMs,
+  onSalesChanged,
 }: PosPanelProps) {
   const text = (key: string) => translate(locale, key);
   const headers = { authorization: `Bearer ${accessToken}` };
@@ -117,6 +136,8 @@ export function PosPanel({
   const [customer, setCustomer] = useState<CustomerRow | null>(null);
   const [tenderInput, setTenderInput] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<SalePaymentMethod>("cash");
+  const [returningSaleId, setReturningSaleId] = useState<string | null>(null);
+  const [returnNotice, setReturnNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -386,16 +407,46 @@ export function PosPanel({
     }
   }
 
-  async function openSale(saleId: string) {
+  function hasPendingReturn(saleId: string): boolean {
+    return loadPending(storage, apiBaseUrl, saleId) !== null;
+  }
+
+  function canReturn(sale: SaleDetail): boolean {
+    return hasPendingReturn(sale.id) || returnEligible(sale);
+  }
+
+  async function openSale(saleId: string, startReturn = false) {
     setHistoryError(false);
     resetPaymentForm();
+    setReturningSaleId(null);
+    setReturnNotice(null);
     const response = await getSale(fetcher, apiBaseUrl, accessToken, saleId);
     if (!response.ok) {
       setHistoryError(true);
       return;
     }
 
-    setDetail((await response.json()) as SaleDetail);
+    const opened = (await response.json()) as SaleDetail;
+    setDetail(opened);
+    if (startReturn) {
+      if (canReturn(opened)) {
+        setReturningSaleId(opened.id);
+      } else {
+        setReturnNotice(returnBlockReason(opened));
+      }
+    }
+  }
+
+  async function refreshSale(saleId: string) {
+    const response = await getSale(fetcher, apiBaseUrl, accessToken, saleId);
+    if (response.ok) {
+      setDetail((await response.json()) as SaleDetail);
+    }
+  }
+
+  async function afterReturn(saleId: string, customerId: string | null) {
+    await Promise.all([refreshSale(saleId), reload()]);
+    onSalesChanged?.(customerId);
   }
 
   useEffect(() => {
@@ -810,11 +861,14 @@ export function PosPanel({
         {history.length === 0 && !historyError ? <p>{text("pos.emptyHistory")}</p> : null}
         <ul className="flex flex-col gap-2">
           {history.map((sale) => (
-            <li key={sale.id}>
+            <li key={sale.id} className="flex flex-wrap gap-2" data-testid={`sale-row-${sale.id}`}>
               <button type="button" className="min-h-12 border border-stone-400 bg-white px-3" onClick={() => void openSale(sale.id)}>
                 <LtrValue>{sale.number}</LtrValue>
                 {" · "}
                 <LtrValue>{sale.total}</LtrValue>
+              </button>
+              <button type="button" className="min-h-12 border border-stone-500 bg-stone-50 px-3" onClick={() => void openSale(sale.id, true)}>
+                {text("returns.action")}
               </button>
             </li>
           ))}
@@ -825,6 +879,7 @@ export function PosPanel({
               <LtrValue>{detail.number}</LtrValue>
             </h4>
             {detail.customerName ? <p>{detail.customerName}</p> : null}
+            {returnNotice ? <p role="alert">{text(returnNotice)}</p> : null}
             <ul className="flex flex-col gap-1">
               {detail.lines.map((line) => (
                 <li key={line.id}>
@@ -968,6 +1023,26 @@ export function PosPanel({
                   </button>
                 )}
               </form>
+            ) : null}
+            {returningSaleId === detail.id ? (
+              <SaleReturnPanel
+                key={detail.id}
+                sale={detail}
+                apiBaseUrl={apiBaseUrl}
+                accessToken={accessToken}
+                fetcher={fetcher}
+                locale={locale}
+                createKey={createKey}
+                storage={storage}
+                timeoutMs={returnTimeoutMs}
+                onReturned={() => afterReturn(detail.id, detail.customerId ?? null)}
+                onRejected={() => refreshSale(detail.id)}
+                onClose={() => setReturningSaleId(null)}
+              />
+            ) : canReturn(detail) ? (
+              <button type="button" className="min-h-12 w-fit border border-stone-500 bg-stone-50 px-3" onClick={() => setReturningSaleId(detail.id)}>
+                {text("returns.action")}
+              </button>
             ) : null}
           </article>
         ) : null}

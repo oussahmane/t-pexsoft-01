@@ -11,6 +11,7 @@ public sealed class SaleWriteFailureTests
         Assert.Equal(ErrorCodes.SaleMovementIntegrity, Mapped(ErrorCodes.SaleMovementIntegrity));
         Assert.Equal(ErrorCodes.SaleReturnMovementIntegrity, Mapped(ErrorCodes.SaleReturnMovementIntegrity));
         Assert.Equal(ErrorCodes.SalePaymentIntegrity, Mapped(ErrorCodes.SalePaymentIntegrity));
+        Assert.Equal(ErrorCodes.SaleCreditOverrideIntegrity, Mapped(ErrorCodes.SaleCreditOverrideIntegrity));
         Assert.Equal(ErrorCodes.SaleTotalIntegrity, Mapped(ErrorCodes.SaleTotalIntegrity));
         Assert.Equal(ErrorCodes.SaleImmutable, Mapped(ErrorCodes.SaleImmutable));
         Assert.Equal(ErrorCodes.StockReconciliation, Mapped(ErrorCodes.StockReconciliation));

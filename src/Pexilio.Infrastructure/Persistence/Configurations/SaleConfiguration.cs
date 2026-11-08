@@ -42,6 +42,32 @@ public sealed class SaleConfiguration : IEntityTypeConfiguration<Sale>
                 ("CustomerId" IS NULL AND "CustomerName" IS NULL AND "CustomerType" IS NULL)
                 OR ("CustomerId" IS NOT NULL AND char_length(btrim("CustomerName")) > 0 AND "CustomerType" IN ('individual', 'business'))
                 """);
+            table.HasCheckConstraint(
+                "CK_sale_credit_override",
+                """
+                (NOT "CreditLimitOverridden"
+                    AND "CreditOverrideReason" IS NULL
+                    AND "CreditOverrideByUserId" IS NULL
+                    AND "CreditOverrideAtUtc" IS NULL
+                    AND "CreditLimitSnapshot" IS NULL
+                    AND "CreditOutstandingBefore" IS NULL
+                    AND "CreditProjectedOutstanding" IS NULL)
+                OR ("CreditLimitOverridden"
+                    AND "CustomerId" IS NOT NULL
+                    AND "CreditOverrideReason" IS NOT NULL
+                    AND btrim("CreditOverrideReason") = "CreditOverrideReason"
+                    AND char_length("CreditOverrideReason") BETWEEN 1 AND 200
+                    AND "CreditOverrideByUserId" IS NOT NULL
+                    AND "CreditOverrideByUserId" = "CreatedByUserId"
+                    AND "CreditOverrideAtUtc" IS NOT NULL
+                    AND "CreditLimitSnapshot" IS NOT NULL
+                    AND "CreditLimitSnapshot" >= 0
+                    AND "CreditOutstandingBefore" IS NOT NULL
+                    AND "CreditOutstandingBefore" >= 0
+                    AND "CreditProjectedOutstanding" IS NOT NULL
+                    AND "CreditProjectedOutstanding" > "CreditLimitSnapshot")
+                """);
+            table.HasTrigger("sale_credit_override_snapshot");
         });
         builder.HasKey(sale => sale.Id);
         builder.HasAlternateKey(sale => new { sale.Id, sale.CompanyId }).HasName("AK_sale_id_company");
@@ -54,6 +80,11 @@ public sealed class SaleConfiguration : IEntityTypeConfiguration<Sale>
         builder.Property(sale => sale.Total).HasColumnType("numeric(19,4)");
         builder.Property(sale => sale.CustomerName).HasMaxLength(CustomerValidator.NameMaxLength);
         builder.Property(sale => sale.CustomerType).HasMaxLength(16);
+        builder.Property(sale => sale.CreditLimitOverridden).HasDefaultValue(false);
+        builder.Property(sale => sale.CreditOverrideReason).HasMaxLength(CustomerCredit.ReasonMaxLength);
+        builder.Property(sale => sale.CreditLimitSnapshot).HasColumnType("numeric(19,4)");
+        builder.Property(sale => sale.CreditOutstandingBefore).HasColumnType("numeric(19,4)");
+        builder.Property(sale => sale.CreditProjectedOutstanding).HasColumnType("numeric(19,4)");
         builder.HasIndex(sale => new { sale.CompanyId, sale.Number }).IsUnique().HasDatabaseName("UX_sale_company_number");
         builder.HasIndex(sale => new { sale.CompanyId, sale.CustomerId, sale.CreatedAtUtc })
             .HasDatabaseName("IX_sale_company_customer_created");
@@ -65,5 +96,6 @@ public sealed class SaleConfiguration : IEntityTypeConfiguration<Sale>
             .OnDelete(DeleteBehavior.Restrict)
             .HasConstraintName("FK_sale_customer");
         builder.HasOne<AppUser>().WithMany().HasForeignKey(sale => sale.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<AppUser>().WithMany().HasForeignKey(sale => sale.CreditOverrideByUserId).OnDelete(DeleteBehavior.Restrict);
     }
 }

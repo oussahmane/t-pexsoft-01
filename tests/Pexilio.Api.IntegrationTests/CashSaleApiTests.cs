@@ -67,7 +67,7 @@ public sealed class CashSaleApiTests : IAsyncLifetime
         Assert.Equal("paid", sale.PaymentState);
         await using var scope = _factory.Services.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<PexilioDbContext>();
-        Assert.Equal("pexilio_test", await CurrentDatabaseAsync(database));
+        Assert.True(TestDatabaseNames.IsDisposable(await CurrentDatabaseAsync(database)));
         Assert.Equal(2, await database.SaleLines.CountAsync(line => line.SaleId == sale.Id));
         var movements = await database.StockMovements.Where(movement => movement.SourceType == StockSourceTypes.Sale).ToListAsync();
         Assert.Equal(2, movements.Count);
